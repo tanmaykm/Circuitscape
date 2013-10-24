@@ -182,7 +182,7 @@ class CSRaster(object):
             # Are all points in same component?  If so, can streamline.  Create G here, just once
             # FIXME: place code below into module 
             node_map = self.construct_node_map(g_map, poly_map_temp) #******WANT POLYS BURNED IN 
-            (component_map, components) = self.construct_component_map(g_map, node_map)
+            (component_map, components) = self.to_components(g_map, node_map)
             pointComponents = where(unique_point_map, component_map, 0)#TODO use this to choose component to operate on below, unless all points in same component
             self.log('Graph has ' + str(node_map.max()) + ' nodes and '+ str(components.max()) + ' components.',2)
             del node_map
@@ -198,7 +198,7 @@ class CSRaster(object):
                 del component_map, components  
         else:
             node_map = self.construct_node_map(g_map, poly_map) #******WANT POLYS BURNED IN 
-            (component_map, components) = self.construct_component_map(g_map, node_map)
+            (component_map, components) = self.to_components(g_map, node_map)
             self.log('Graph has ' + str(node_map.max()) + ' nodes and '+ str(components.max()) + ' components.',2)
             del node_map, component_map, components
 
@@ -348,11 +348,26 @@ class CSRaster(object):
         # If there are no focal regions, pass all points to single_ground_all_pair_resistances,
         # otherwise, pass one point at a time.
         if self.options.point_file_contains_polygons == False:
+            
             if points_rc.shape[0] != (numpy.unique(numpy.asarray(points_rc[:,0]))).shape[0]:
                 raise RuntimeError('At least one focal node contains multiple cells.  If this is what you really want, then choose focal REGIONS in the pull-down menu') 
             
             if self.options.use_included_pairs == True:
                 points_rc = self.prune_included_pairs(points_rc)
+
+            print("solving file: %s"%(self.options.habitat_file,))
+            xnode_map = self.construct_node_map(g_map, poly_map)
+            xG = self.construct_g_graph(g_map, xnode_map)
+            nzr, nzc = xG.nonzero()
+            nodeNames = numpy.unique(numpy.concatenate((nzr, nzc)))
+            focalNodes = numpy.unique(numpy.asarray(points_rc))
+            print "node_map = %s"%(str(xnode_map,))
+            print "xG = %s" % (str(xG))
+            print "nzr=%s, nzc=%s"%(str(nzr),str(nzc))
+            print "nodeNames=%s"%(str(nodeNames),)
+            print "focalNodes=%s"%(str(focalNodes,))
+            res = self.compute_network_pairwise(xG, nodeNames, focalNodes)
+            print res
             
             report_status = True
             try:
@@ -442,6 +457,7 @@ class CSRaster(object):
                 if self.options.write_max_cur_maps == True:      
                     CSIO.write_aaigrid('max_curmap', '', max_current_map, self.options, self.state)
 
+        print str((resistances, solver_failed))
         return resistances,solver_failed
     
     
@@ -459,160 +475,28 @@ class CSRaster(object):
         
         if (self.options.point_file_contains_polygons==True) or  (self.options.write_cur_maps == True) or (self.options.write_volt_maps == True) or (self.options.use_included_pairs==True): 
             use_resistance_calc_shortcut = False
+            shortcut_resistances = None
         else:     
             use_resistance_calc_shortcut = True # We use this when there are no focal regions.  It saves time when we are also not creating maps
             shortcut_resistances = -1 * numpy.ones((numpoints, numpoints), dtype='float64') 
            
         solver_failed_somewhere = False
         node_map = self.construct_node_map(g_map, poly_map) # Polygons burned in to node map 
-        (component_map, components) = self.construct_component_map(g_map, node_map)
+        (component_map, components) = self.to_components(g_map, node_map)
         
         resistances = -1 * numpy.ones((numpoints, numpoints), dtype = 'float64')         #Inf creates trouble in python 2.5 on Windows. Use -1 instead.
         
         self.log('Graph has %d nodes and %d components'%(node_map.max(), components.max()), 2)
-        last_write_time = time.time()
-        x = 0
         for comp in range(1, int(components.max()+1)):
             if not self.check_points_in_component(comp, numpoints, components, points_rc, node_map):
                 continue
             
             (G, local_node_map) = self.node_pruner(g_map, poly_map, component_map, comp)
             if comp == int(components.max()):
-                del component_map 
-            if (use_resistance_calc_shortcut == True):
-                voltmatrix = numpy.zeros((numpoints,numpoints), dtype='float64')     #For resistance calc shortcut
+                del component_map
+
+            resistances, shortcut_resistances, cum_current_map, max_current_map, solver_failed_somewhere = self.single_ground_all_pair_resistances_for_component(G, included_pairs, points_rc, components, node_map, local_node_map, comp, resistances, shortcut_resistances, cum_current_map, max_current_map, use_resistance_calc_shortcut, report_status)
             
-            dst_point = 0
-            anchor_point = 0 #For resistance calc shortcut
-            
-            ##############
-            for i in range(0, numpoints):
-                if range(i, numpoints) == []:
-                    break
-
-                if (use_resistance_calc_shortcut==True) and (dst_point>0): 
-                    break #No need to continue, we've got what we need to calculate resistances
-
-                dst = self.grid_to_graph(points_rc[i,1], points_rc[i,2], node_map)
-                local_dst = self.grid_to_graph(points_rc[i,1], points_rc[i,2], local_node_map)
-                if (dst >=  0 and components[dst] == comp):
-                    dst_point = dst_point+1
-                    #Gsolve = []
-                
-                    G_dst_dst = G[local_dst, local_dst] 
-                    G[local_dst, local_dst] = 0
-
-                    self.state.amg_hierarchy = None
-                    gc.collect()
-                    self.create_amg_hierarchy(G)
-
-                    ################    
-                    for j in range(i+1, numpoints):
-                        if included_pairs[i+1,j+1] != 1: #Test for pair in included_pairs
-                            continue
-                        
-                        if self.state.amg_hierarchy==None: #Called in case of memory error in current mapping
-                            self.create_amg_hierarchy(G)
-                       
-                        # tan: parallelize here
-                        if report_status==True:
-                            x = x+1
-                            if use_resistance_calc_shortcut==True:
-                                y = numpoints
-                                self.log('solving focal node %d of %d'%(x,y), 1)
-                            else:
-                                y = numpoints*(numpoints-1)/2
-                                self.log('solving focal pair %d of %d'%(x,y), 1)
-                        src = self.grid_to_graph(points_rc[j,1], points_rc[j,2], node_map)
-                        local_src = self.grid_to_graph (points_rc[j,1], points_rc[j,2], local_node_map)
-                        if (src >=  0 and components[src] == comp):
-                            # Solve resistive network (Kirchoff's laws)
-                            solver_failed = False
-                            try:
-                                voltages = self.single_ground_solver(G, local_src, local_dst)
-                            except:
-                                solver_failed = True
-                                solver_failed_somewhere = True
-                                resistances[i, j] = -777
-                                resistances[j, i] = -777
-
-                            if solver_failed == False:
-                                if self.options.low_memory_mode==True or self.options.point_file_contains_polygons==True:
-                                    self.state.amg_hierarchy = None
-                                    gc.collect()    
-                                
-                                resistances[i, j] = voltages[local_src] - voltages[local_dst]
-                                resistances[j, i] = voltages[local_src] - voltages[local_dst]
-                                # Write maps to files
-                                frompoint = str(points_rc[i,0])
-                                topoint = str(points_rc[j,0])
-                                
-                                if use_resistance_calc_shortcut==True:
-                                    if dst_point == 1: #this occurs for first i that is in component
-                                        anchor_point = i #for use later in shortcult resistance calc
-                                        voltmatrix = self.getVoltmatrix(i, j, numpoints, local_node_map, voltages, points_rc, resistances, voltmatrix)                                          
-
-                                if self.options.write_volt_maps == True:
-                                    if report_status==True:
-                                        self.log('writing voltage map %d of %d'%(x,y), 1)
-                                    voltage_map = self.create_voltage_map(local_node_map, voltages) 
-                                    CSIO.write_aaigrid('voltmap', '_' + frompoint + '_' + topoint, voltage_map, self.options, self.state)
-                                    del voltage_map
-                                    
-                                if self.options.write_cur_maps == True:
-                                    if report_status==True:
-                                        self.log ('writing current map %d of %d'%(x,y), 1)
-                                    finitegrounds = [-9999] #create dummy value for pairwise case
-                                    
-                                    try:
-                                        G = G.tocoo()#Can cause memory error
-                                    except MemoryError:
-                                        self.enable_low_memory(False)
-                                        G = G.tocoo()
-                                        
-                                    try:
-                                        current_map = self.create_current_map(voltages, G, local_node_map, finitegrounds)
-                                    except MemoryError:
-                                        self.enable_low_memory(False)
-                                        current_map = self.create_current_map(voltages, G, local_node_map, finitegrounds)
-
-                                    G = G.tocsr()
-
-                                    if self.options.set_focal_node_currents_to_zero==True:
-                                        # set source and target node currents to zero
-                                        focal_node_pair_map = numpy.where(local_node_map == local_src+1, 0, 1)
-                                        focal_node_pair_map = numpy.where(local_node_map == local_dst+1, 0, focal_node_pair_map)                                                
-                                        #print'fn', focal_node_pair_map
-                                        current_map = numpy.multiply(focal_node_pair_map, current_map)
-                                        #print 'comp',current_map
-                                        del focal_node_pair_map
-                                    cum_current_map = cum_current_map + current_map
-                                     
-                                    if self.options.write_max_cur_maps == True:
-                                        max_current_map = numpy.maximum(max_current_map, current_map) 
-                                    if self.options.write_cum_cur_map_only == False:
-                                        if self.options.log_transform_maps == True:
-                                            current_map = numpy.where(current_map>0, log10(current_map), self.state.nodata)
-                                        CSIO.write_aaigrid('curmap', '_' + frompoint + '_' + topoint, current_map, self.options, self.state)
-                                    del current_map    
-
-                                (hours,mins,_secs) = elapsed_time(last_write_time)
-                                if (mins > 2) or (hours > 0): 
-                                    last_write_time = time.time()
-                                    CSIO.save_incomplete_resistances(self.options.output_file, resistances)# Save incomplete resistances
-                    if (use_resistance_calc_shortcut==True and i==anchor_point): # This happens once per component. Anchorpoint is the first i in component
-                        shortcut_resistances = self.get_shortcut_resistances(anchor_point, voltmatrix, numpoints, resistances, shortcut_resistances)
-                                            
-                    G[local_dst, local_dst] = G_dst_dst
-
-                #End for
-                self.state.amg_hierarchy = None
-                gc.collect()
-
-            #End if
-            self.state.amg_hierarchy = None
-            gc.collect()
-
         # Finally, resistance to self is 0.
         if use_resistance_calc_shortcut==True: 
             resistances = shortcut_resistances
@@ -621,18 +505,160 @@ class CSRaster(object):
 
         return resistances, cum_current_map, max_current_map, solver_failed_somewhere
 
+
+    def single_ground_all_pair_resistances_for_component(self, G, included_pairs, points_rc, components, node_map, local_node_map, comp, resistances, shortcut_resistances, cum_current_map, max_current_map, use_resistance_calc_shortcut, report_status):
+        numpoints = points_rc.shape[0] 
+        last_write_time = time.time()
+        x = 0
+        solver_failed_somewhere = False
+        
+        if (use_resistance_calc_shortcut == True):
+            voltmatrix = numpy.zeros((numpoints,numpoints), dtype='float64')     #For resistance calc shortcut
+        
+        dst_point = 0
+        anchor_point = 0 #For resistance calc shortcut
+        
+        ##############
+        for i_idx in range(0, numpoints):
+            if range(i_idx, numpoints) == []:
+                break
+
+            if (use_resistance_calc_shortcut == True) and (dst_point > 0): 
+                break #No need to continue, we've got what we need to calculate resistances
+
+            dst = self.grid_to_graph(points_rc[i_idx,1], points_rc[i_idx,2], node_map)
+            local_dst = self.grid_to_graph(points_rc[i_idx,1], points_rc[i_idx,2], local_node_map)
+            #if(dst != local_dst):
+            #    print("dst=%d local_dst=%d"%(dst,local_dst))
+            
+            if (dst >=  0 and components[dst] == comp):
+                dst_point += 1
+                #Gsolve = []
+            
+                G_dst_dst = G[local_dst, local_dst] 
+                G[local_dst, local_dst] = 0
+
+                self.state.amg_hierarchy = None
+                gc.collect()
+                self.create_amg_hierarchy(G)
+
+                ################    
+                for j_idx in range(i_idx+1, numpoints):
+                    if included_pairs[i_idx+1, j_idx+1] != 1: #Test for pair in included_pairs
+                        continue
+                    
+                    if self.state.amg_hierarchy == None: #Called in case of memory error in current mapping
+                        self.create_amg_hierarchy(G)
+                   
+                    # tan: parallelize here
+                    if report_status==True:
+                        x = x+1
+                        if use_resistance_calc_shortcut==True:
+                            y = numpoints
+                            self.log('solving focal node %d of %d'%(x,y), 1)
+                        else:
+                            y = numpoints*(numpoints-1)/2
+                            self.log('solving focal pair %d of %d'%(x,y), 1)
+                    src = self.grid_to_graph(points_rc[j_idx,1], points_rc[j_idx,2], node_map)
+                    local_src = self.grid_to_graph (points_rc[j_idx,1], points_rc[j_idx,2], local_node_map)
+                    #if(src != local_src):
+                    #    print("src=%d local_src=%d"%(src,local_src))
+                    
+                    if (src >=  0 and components[src] == comp):
+                        #print ("solving src=%d local_src=%d dst=%d local_dst=%d componets_src=%d components_dst=%d"%(src,local_src,dst,local_dst, components[src], components[dst]))
+                        # Solve resistive network (Kirchoff's laws)
+                        solver_failed = False
+                        try:
+                            voltages = self.single_ground_solver(G, local_src, local_dst)
+                        except:
+                            solver_failed = True
+                            solver_failed_somewhere = True
+                            resistances[i_idx, j_idx] = -777
+                            resistances[j_idx, i_idx] = -777
+
+                        if solver_failed == False:
+                            if self.options.low_memory_mode==True or self.options.point_file_contains_polygons==True:
+                                self.state.amg_hierarchy = None
+                                gc.collect()    
+                            
+                            resistances[i_idx, j_idx] = voltages[local_src] - voltages[local_dst]
+                            resistances[j_idx, i_idx] = voltages[local_src] - voltages[local_dst]
+                            # Write maps to files
+                            frompoint = str(points_rc[i_idx,0])
+                            topoint = str(points_rc[j_idx,0])
+                            
+                            if use_resistance_calc_shortcut==True:
+                                if dst_point == 1: #this occurs for first i_idx that is in component
+                                    anchor_point = i_idx #for use later in shortcult resistance calc
+                                    voltmatrix = self.getVoltmatrix(i_idx, j_idx, numpoints, local_node_map, voltages, points_rc, resistances, voltmatrix)                                          
+
+                            if self.options.write_volt_maps == True:
+                                if report_status==True:
+                                    self.log('writing voltage map %d of %d'%(x,y), 1)
+                                voltage_map = self.create_voltage_map(local_node_map, voltages) 
+                                CSIO.write_aaigrid('voltmap', '_' + frompoint + '_' + topoint, voltage_map, self.options, self.state)
+                                del voltage_map
+                                
+                            if self.options.write_cur_maps == True:
+                                if report_status==True:
+                                    self.log ('writing current map %d of %d'%(x,y), 1)
+                                finitegrounds = [-9999] #create dummy value for pairwise case
+                                
+                                try:
+                                    current_map = self.create_current_map(voltages, G.tocoo(), local_node_map, finitegrounds)
+                                except MemoryError:
+                                    self.enable_low_memory(False)
+                                    current_map = self.create_current_map(voltages, G.tocoo(), local_node_map, finitegrounds)
+
+                                if self.options.set_focal_node_currents_to_zero==True:
+                                    # set source and target node currents to zero
+                                    focal_node_pair_map = numpy.where(local_node_map == local_src+1, 0, 1)
+                                    focal_node_pair_map = numpy.where(local_node_map == local_dst+1, 0, focal_node_pair_map)                                                
+                                    #print'fn', focal_node_pair_map
+                                    current_map = numpy.multiply(focal_node_pair_map, current_map)
+                                    #print 'comp',current_map
+                                    del focal_node_pair_map
+                                cum_current_map = cum_current_map + current_map
+                                 
+                                if self.options.write_max_cur_maps == True:
+                                    max_current_map = numpy.maximum(max_current_map, current_map) 
+                                if self.options.write_cum_cur_map_only == False:
+                                    if self.options.log_transform_maps == True:
+                                        current_map = numpy.where(current_map>0, log10(current_map), self.state.nodata)
+                                    CSIO.write_aaigrid('curmap', '_' + frompoint + '_' + topoint, current_map, self.options, self.state)
+                                del current_map    
+
+                            (hours,mins,_secs) = elapsed_time(last_write_time)
+                            if (mins > 2) or (hours > 0): 
+                                last_write_time = time.time()
+                                CSIO.save_incomplete_resistances(self.options.output_file, resistances)# Save incomplete resistances
+                if (use_resistance_calc_shortcut==True and i_idx==anchor_point): # This happens once per component. Anchorpoint is the first i_idx in component
+                    shortcut_resistances = self.get_shortcut_resistances(anchor_point, voltmatrix, numpoints, resistances, shortcut_resistances)
+                                        
+                G[local_dst, local_dst] = G_dst_dst
+
+                self.state.amg_hierarchy = None
+                gc.collect()
+
+        #End if
+        self.state.amg_hierarchy = None
+        gc.collect()
+        
+        return resistances, shortcut_resistances, cum_current_map, max_current_map, solver_failed_somewhere
+
+
         
     @print_timing
     def single_ground_solver(self, G, src, dst):
-        """Solver used for pairwise mode."""  
+        """Solver used for pairwise mode."""
         n = G.shape[0]
-        rhs = zeros(n, dtype = 'float64')
-        if src==dst:
-            voltages = zeros(n, dtype = 'float64')
+        if src == dst:
+            voltages = numpy.zeros(n, dtype='float64')
         else:
+            rhs = numpy.zeros(n, dtype='float64')
             rhs[dst] = -1
             rhs[src] = 1
-            voltages = self.solve_linear_system (G, rhs)
+            voltages = self.solve_linear_system(G, rhs)
 
         return voltages
 
@@ -649,7 +675,7 @@ class CSRaster(object):
 
         if oneToAllStreamline==False:
             node_map = self.construct_node_map(g_map, poly_map)
-            (component_map, components) = self.construct_component_map(g_map, node_map)
+            (component_map, components) = self.to_components(g_map, node_map)
         if self.options.scenario=='advanced':
             self.log('Graph has ' + str(node_map.max()) + ' nodes and '+ str(components.max())+ ' components.',2)
             
@@ -870,21 +896,23 @@ class CSRaster(object):
         return node_map
 
     @print_timing
-    def construct_component_map(self, g_map, node_map):
+    def to_components(self, g_map, node_map):
         """Assigns component numbers to grid corresponding to pixels with non-zero conductances.
         
         Nodes with the same component number are in single, connected components.
         
         """  
-        prunedMap = False
-        G = self.construct_g_graph(g_map, node_map, prunedMap) 
+        G = self.construct_g_graph(g_map, node_map)
+        return self.construct_component_map(G, node_map)
+        
+    def construct_component_map(self, G, node_map): 
         (_numComponents, C) = connected_components(G)
         C += 1 # Number components from 1
 
-        (I, J) = where(node_map)
+        (I, J) = numpy.where(node_map)
         nodes = node_map[I, J].flatten()
 
-        component_map = zeros(node_map.shape, dtype = 'int32')
+        component_map = numpy.zeros(node_map.shape, dtype='int32')
         component_map[I, J] = C[nodes-1]
 
         #print "component_map:"
@@ -895,7 +923,7 @@ class CSRaster(object):
 
 
     @print_timing
-    def construct_g_graph(self, g_map, node_map,prunedMap):
+    def construct_g_graph(self, g_map, node_map):
         """Construct sparse adjacency matrix given raster maps of conductances and nodes."""  
         numnodes = node_map.max()
         (node1, node2, conductances) = self.get_conductances(g_map, node_map)
@@ -904,6 +932,8 @@ class CSRaster(object):
         
         #print "g_graph ="
         #print g_graph
+        #print "node_map: "
+        #print node_map
         return g_graph
 
     def get_horiz_neighbors(self, g_map):
@@ -1022,7 +1052,6 @@ class CSRaster(object):
         """Removes nodes outside of component being operated on.
         
         Returns node map and adjacency matrix that only include nodes in keep_component.
-        
         """  
         selector = component_map == keep_component
         
@@ -1032,8 +1061,7 @@ class CSRaster(object):
             poly_map_pruned = selector * poly_map
 
         node_map_pruned = self.construct_node_map(g_map_pruned, poly_map_pruned)
-        prunedMap = True
-        G_pruned = self.construct_g_graph(g_map_pruned, node_map_pruned, prunedMap) 
+        G_pruned = self.construct_g_graph(g_map_pruned, node_map_pruned) 
         G = self.laplacian(G_pruned) 
         
         return (G, node_map_pruned)
@@ -1055,14 +1083,13 @@ class CSRaster(object):
     def create_amg_hierarchy(self, G): 
         """Creates AMG hierarchy."""  
         if self.options.solver == 'amg' or self.options.solver == 'cg+amg':
-            self.state.amg_hierarchy = None
+            self.state.amg_hierarchy = smoothed_aggregation_solver(G)
+            #self.state.amg_hierarchy = None
             # construct the MG hierarchy
-            ml = []
+            #ml = []
             #  scipy.io.savemat('c:\\temp\\graph.mat',mdict={'d':G})
-            ml = smoothed_aggregation_solver(G)
-            self.state.amg_hierarchy = ml
-  
-        return
+            #ml = smoothed_aggregation_solver(G)
+            #self.state.amg_hierarchy = ml
 
         
     @print_timing
@@ -1071,15 +1098,14 @@ class CSRaster(object):
         gc.collect()
         # Solve G*x = rhs
         x = []
+        ml = self.state.amg_hierarchy
+        
         if self.options.solver == 'cg+amg':
-            ml = self.state.amg_hierarchy
             G.psolve = ml.psolve
             (x, flag) = cg(G, rhs, tol = 1e-6, maxiter = 100000)
             if flag !=  0 or numpy.linalg.norm(G*x-rhs) > 1e-3:
                 raise RuntimeError('CG did not converge. May need more iterations.') 
-
-        if self.options.solver == 'amg':
-            ml = self.state.amg_hierarchy
+        elif self.options.solver == 'amg':
             x = ml.solve(rhs, tol = 1e-6);
 
         return x 
