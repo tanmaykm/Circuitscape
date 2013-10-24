@@ -4,11 +4,12 @@
 ##
 
 import time, gc
+import numpy as np
 from numpy import *
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
-from cs_util import print_timing, elapsed_time, deletecol, deleterowcol, relabel
+from cs_util import print_timing, deletecol, deleterowcol, relabel
 from cs_io import CSIO
 from cs_raster import CSRaster
 
@@ -35,7 +36,7 @@ class circuitscape(CSRaster):
             self.options.focal_node_file = self.options.point_file
 
         self.state.startTime = time.time()
-        self.state.lastUpdateTime = time.time()        
+        self.state.last_gui_yield_time = time.time()        
         self.log('',1)
         self.log('',2)
 
@@ -53,40 +54,43 @@ class circuitscape(CSRaster):
     def compute_network(self): 
         """Solves arbitrary graphs instead of raster grids."""  
         solver_failed = False
-        (g_graph,nodeNames) = self.read_graph(self.options.graph_file)
-        (numComponents, C) = connected_components(g_graph)
+        (g_graph, node_names) = self.read_graph(self.options.graph_file)
+        
+        (num_components, C) = connected_components(g_graph)
         C += 1 # Number components from 1
-        self.log('Graph has ' + str(g_graph.shape[0]) + ' nodes and '+ str(numComponents) + ' components.',2)
-        if numComponents > 1:
+        
+        self.log('Graph has %d nodes and %d components'%(g_graph.shape[0], num_components), 2)
+        
+        if num_components > 1:
             full_graph = g_graph
         else:
-            nodesInComponent = nodeNames
+            nodes_in_component = node_names
         
-        fullResistances = [] # initialize
-        fullNodeCurrents = []
-        for component in range (1,numComponents + 1):
-            if numComponents > 1:
-                indices = nodeNames[where(C == component)]
-                delIndices = where(C != component)
-                indices = where(C == component)
-                nodesInComponent = nodeNames[indices]                
-                g_graph = deleterowcol(full_graph, delrow = delIndices, delcol = delIndices)
+        full_resistances = [] # initialize
+        full_node_currents = []
+        for component in range(1, num_components+1):
+            if num_components > 1:
+                indices = node_names[np.where(C == component)]
+                del_indices = np.where(C != component)
+                indices = np.where(C == component)
+                nodes_in_component = node_names[indices]                
+                g_graph = deleterowcol(full_graph, delrow = del_indices, delcol = del_indices)
                 
             G = self.laplacian(g_graph)
             del g_graph
-            if self.options.scenario=='advanced':
+            if self.options.scenario == 'advanced':
                 raise RuntimeError('Advanced mode is not yet implemented in graph/network mode.')
-                #(sources,grounds)= self.readSourcesGroundsNetwork(G, nodeNames, self.options.source_file,self.options.ground_file)
+                #(sources,grounds)= self.readSourcesGroundsNetwork(G, node_names, self.options.source_file,self.options.ground_file)
                 #FIXME: retool readSourceGroundNodes to read both files and return complete sources and grounds
-                #result,solver_failed = self.advanced_module_network(G,sources,grounds,nodeNames)           
+                #result,solver_failed = self.advanced_module_network(G,sources,grounds,node_names)           
                 
             else:
                 if self.options.use_included_pairs==True:
-                    self.state.includedPairs = CSIO.read_included_pairs(self.options.included_pairs_file)
+                    self.state.included_pairs = CSIO.read_included_pairs(self.options.included_pairs_file)
                 focalNodes = self.readFocalNodes(self.options.focal_node_file)
-                if numComponents > 1:    #Prune out any focal nodes that are not in component
+                if num_components > 1:    #Prune out any focal nodes that are not in component
                     focalNodesInComponent = focalNodes
-                    includeList = list(nodesInComponent[:])
+                    includeList = list(nodes_in_component[:])
                     numFocalNodes = focalNodesInComponent.shape[0]
                     row = 0
                     while row <numFocalNodes: 
@@ -104,52 +108,52 @@ class circuitscape(CSRaster):
                 if self.options.scenario=='pairwise':
                     if numFocalNodes > 1:
                         # module returns arrays with node names
-                        cumBranchCurrents,cumNodeCurrents,resistances3columns,solver_failed = self.pairwise_module_network(G,focalNodesInComponent,nodesInComponent,numComponents)
+                        cumBranchCurrents,cumNodeCurrents,resistances3columns,solver_failed = self.pairwise_module_network(G,focalNodesInComponent,nodes_in_component,num_components)
                     else: #nothing to solve
-                        cumNodeCurrents = zeros((len(nodesInComponent),2),dtype = 'float64')
-                        cumNodeCurrents[:,0] = nodesInComponent
+                        cumNodeCurrents = zeros((len(nodes_in_component),2),dtype = 'float64')
+                        cumNodeCurrents[:,0] = nodes_in_component
                         resistances3columns = []
                         cumBranchCurrents = []
                     
                     # if first connected component solved, 
                     # then create output arrays
-                    if (fullResistances == []) and (resistances3columns != []):
-                        fullResistances = resistances3columns
+                    if (full_resistances == []) and (resistances3columns != []):
+                        full_resistances = resistances3columns
                         if self.options.write_cur_maps == True:
                             fullBranchCurrents = cumBranchCurrents 
-                            fullNodeCurrents = cumNodeCurrents
+                            full_node_currents = cumNodeCurrents
                     
                     # if ongoing solve, append results to ongoing output arrays
                     elif resistances3columns != []: 
-                        fullResistances = append(fullResistances , resistances3columns, axis=0)
+                        full_resistances = append(full_resistances , resistances3columns, axis=0)
                         if self.options.write_cur_maps == True:
                             fullBranchCurrents = append(fullBranchCurrents , cumBranchCurrents, axis=0)
-                            fullNodeCurrents = append(fullNodeCurrents , cumNodeCurrents, axis=0)
+                            full_node_currents = append(full_node_currents , cumNodeCurrents, axis=0)
                     else: # If only node in component, just modify node current array
                         if self.options.write_cur_maps == True:
-                            if fullNodeCurrents == []: #if first time populated
-                                fullNodeCurrents = cumNodeCurrents
-                            fullNodeCurrents = append(fullNodeCurrents , cumNodeCurrents, axis=0)
+                            if full_node_currents == []: #if first time populated
+                                full_node_currents = cumNodeCurrents
+                            full_node_currents = append(full_node_currents , cumNodeCurrents, axis=0)
                     
                 else:
                     raise RuntimeError('One-to-all and all-to-one modes are not yet implemented in graph/network mode.')
-                    #result,solver_failed = self.one_to_all_module_network(G,focalNodes,nodeNames)  
+                    #result,solver_failed = self.one_to_all_module_network(G,focalNodes,node_names)  
 
         if self.options.write_cur_maps == True:
             ind = lexsort((fullBranchCurrents[:, 1], fullBranchCurrents[:, 0]))
             fullBranchCurrents = fullBranchCurrents[ind]                        
                 
-            ind = lexsort((fullNodeCurrents[:, 1], fullNodeCurrents[:, 0]))
-            fullNodeCurrents = fullNodeCurrents[ind]                        
+            ind = lexsort((full_node_currents[:, 1], full_node_currents[:, 0]))
+            full_node_currents = full_node_currents[ind]                        
 
             fileadd='cum'
-            CSIO.write_currents(self.options.output_file, fullBranchCurrents, fullNodeCurrents, fileadd)
+            CSIO.write_currents(self.options.output_file, fullBranchCurrents, full_node_currents, fileadd)
 
         #Make lists of focal node pairs.  Use to add disconnected pairs
         #to resistance output.
         resistancePairList = list()
-        for row in range(0,fullResistances.shape[0]): 
-            listEntry = str(int(fullResistances[row,0])) + "_" + str(int(fullResistances[row,1]))
+        for row in range(0,full_resistances.shape[0]): 
+            listEntry = str(int(full_resistances[row,0])) + "_" + str(int(full_resistances[row,1]))
             resistancePairList.append(listEntry)
             # print listEntry
         # print resistancePairList
@@ -161,16 +165,16 @@ class circuitscape(CSRaster):
                     # Add in disconnected pair
                     newPair = array([[focalNodes[sourceNode],focalNodes[targetNode],-1]])
                     # print 'new',newPair
-                    fullResistances = append(fullResistances , newPair, axis=0)
+                    full_resistances = append(full_resistances , newPair, axis=0)
             
-        ind = lexsort((fullResistances[:, 1], fullResistances[:, 0]))
-        fullResistances = fullResistances[ind] 
-        CSIO.write_resistances_3columns(self.options.output_file, fullResistances)
+        ind = lexsort((full_resistances[:, 1], full_resistances[:, 0]))
+        full_resistances = full_resistances[ind] 
+        CSIO.write_resistances_3columns(self.options.output_file, full_resistances)
         
-        return fullResistances,solver_failed #Fixme: need to check solver failed.
+        return full_resistances,solver_failed #Fixme: need to check solver failed.
 
           
-    def pairwise_module_network(self, G, focalNodes, nodeNames, numComponents):
+    def pairwise_module_network(self, G, focal_nodes, nodeNames, numComponents):
         """Overhead module to solves arbitrary graphs in pairwise mode.
         
         Returns branch currents in 3-col format plus 3-column voltages,
@@ -179,37 +183,42 @@ class circuitscape(CSRaster):
         Writes currents voltages and for each pair.
 
         """
+        self.log('Graph has %d nodes and %d components'%(focal_nodes.size, numComponents), 2)
+        
         solver_failed = False
         if self.options.use_included_pairs==True: #Prune points
-            focalNodes = self.pruneIncludedPairsNetwork(focalNodes)          
-            includedPairs = self.state.includedPairs 
+            focal_nodes = self.prune_included_pairs_network(focal_nodes)          
+            included_pairs = self.state.included_pairs 
         else:
-            includedPairs = ones((focalNodes.size+1,focalNodes.size+1),dtype = 'int32')
+            included_pairs = np.ones((focal_nodes.size+1, focal_nodes.size+1), dtype='int32')
 
-        numpoints = focalNodes.size
-        resistances = -1*ones((focalNodes.size,focalNodes.size),dtype = 'float64')
+        numpoints = focal_nodes.size
+        resistances = -1*np.ones((focal_nodes.size, focal_nodes.size), dtype='float64')
         if self.options.write_cur_maps == True:
-            cumNodeCurrents = zeros((G.shape[0],1),dtype = 'float64')
-            cumBranchCurrents = sparse.csr_matrix((G.shape))
+            cum_node_currents = np.zeros((G.shape[0],1),dtype = 'float64')
+            cum_branch_currents = sparse.csr_matrix((G.shape))
         if (self.options.write_cur_maps == True) or (self.options.write_volt_maps == True) or (self.options.use_included_pairs==True):        
-            useResistanceCalcShortcut = False
+            use_resistance_calc_shortcut = False
         else:
-            useResistanceCalcShortcut = True
+            use_resistance_calc_shortcut = True
             # This uses a quicker way to calculate pairwise resistances.  There may be something even quicker, I'm looking into this. BHM 3-15-2013
             print 'Using shortcut'
-            shortcutResistances = -1 * ones((numpoints, numpoints), dtype = 'float64') 
-            voltmatrix = zeros((numpoints,numpoints),dtype = 'float64')     
-        dstPoint = 0
-        anchorPoint = 0            
+            shortcut_resistances = -1 * np.ones((numpoints, numpoints), dtype='float64') 
+            voltmatrix = np.zeros((numpoints, numpoints), dtype='float64')
+                 
+        dst_point = 0
+        anchor_point = 0            
         
         x = 0
         for i in range(0, numpoints):
             if range(i, numpoints) == []:
                 break
-            if (useResistanceCalcShortcut==True) and (dstPoint>0):
+            
+            if (use_resistance_calc_shortcut==True) and (dst_point>0):
                 break #No need to continue, we've got what we need to calculate resistances
-            dstPoint = dstPoint+1            
-            dst = self.nameToNode(nodeNames,focalNodes[i])
+            
+            dst_point = dst_point+1            
+            dst = self.name_to_node(nodeNames, focal_nodes[i])
             G_dst_dst = G[dst, dst] 
             G[dst,dst] = 0
             self.state.amg_hierarchy = None
@@ -218,73 +227,73 @@ class circuitscape(CSRaster):
             
             for j in range(i+1, numpoints):
                 x = x+1
-                (hours,mins,_secs) = elapsed_time(self.state.startTime)
-                if useResistanceCalcShortcut==True:
+                if use_resistance_calc_shortcut==True:
                     y = numpoints
-                    self.log ('At ' + str(hours) +' hr ' + str(mins) + ' min solving focal node ' + str(x) + ' of '+ str(y) + '.',1)
+                    self.log('solving focal node %d of %d'%(x,y), 1)
                 else:
                     y = numpoints*(numpoints-1)/2
-                    self.log ('At ' + str(hours) +' hr ' + str(mins) + ' min solving focal pair ' + str(x) + ' of '+ str(y) + '.',1)            
-                if includedPairs[i+1,j+1]==1:
-                    src = self.nameToNode(nodeNames,focalNodes[j])
-                    try:
-                        voltages = self.single_ground_solver(G, src, dst)
+                    self.log ('solving focal pair %d of %d'%(x,y), 1)   
+                             
+                if included_pairs[i+1,j+1] != 1:
+                    continue
+                
+                src = self.name_to_node(nodeNames, focal_nodes[j])
+                try:
+                    voltages = self.single_ground_solver(G, src, dst)
+                    resistances[i, j] = voltages[src] - voltages[dst]
+                    resistances[j, i] = voltages[src] - voltages[dst]
+                except:
+                    solver_failed = True
+                    resistances[i, j] = -777
+                    resistances[j, i] = -777
 
-                        resistances[i, j] = voltages[src] - voltages[dst]
-                        resistances[j, i] = voltages[src] - voltages[dst]
-                    except:
-                        solver_failed = True
-                        resistances[i, j] = -777
-                        resistances[j, i] = -777
-    
-                    if (useResistanceCalcShortcut==True) and (dstPoint==1) and (solver_failed==False): #this occurs for first i that is in component
-                        anchorPoint = i #for use later in shortcut resistance calc
-                        voltmatrix = self.getVoltmatrixNetwork(i,j,numpoints,voltages,resistances,voltmatrix,focalNodes,nodeNames) 
-    
-                    if (self.options.write_cur_maps == True) and (solver_failed==False):
-                        finitegrounds = [-9999]
-                        (node_currents,branch_currents) = self.getCurrentsNetwork(G,voltages,finitegrounds)
-                        
-                        
-                        # Append node names and convert to array format
-                        branchCurrentsArray = self.convert_graph_to_3_col(branch_currents,nodeNames)
-                        nodeCurrentsArray = self.append_names_to_node_currents(node_currents, nodeNames)
-                        
-                        if self.options.write_cum_cur_map_only==False:                
-                            fileadd=str(int(focalNodes[i])) + '_' + str(int(focalNodes[j]))
-                            CSIO.write_currents(self.options.output_file, branchCurrentsArray, nodeCurrentsArray, fileadd)
+                if (use_resistance_calc_shortcut==True) and (dst_point==1) and (solver_failed==False): #this occurs for first i that is in component
+                    anchor_point = i #for use later in shortcut resistance calc
+                    voltmatrix = self.getVoltmatrixNetwork(i, j, numpoints, voltages, resistances, voltmatrix, focal_nodes, nodeNames) 
 
-                        cumNodeCurrents=cumNodeCurrents+node_currents
-                        cumBranchCurrents=cumBranchCurrents+branch_currents                       
-    
-                    if (self.options.write_volt_maps == True) and (solver_failed==False):
-                        fileadd=str(int(focalNodes[i])) + '_' + str(int(focalNodes[j]))
-                        CSIO.write_voltages(self.options.output_file, voltages, nodeNames, fileadd)
-    
-                    if solver_failed==True:
-                        solver_failed = False
-                        #solver_failed_somewhere = True                 
-            if (useResistanceCalcShortcut==True) and (i==anchorPoint): #this happens once per component. Anchorpoint is the first i in component
-                shortcutResistances = self.getShortcutResistances(anchorPoint,voltmatrix,numpoints,resistances,shortcutResistances)
+                if (self.options.write_cur_maps == True) and (solver_failed==False):
+                    finitegrounds = [-9999]
+                    (node_currents, branch_currents) = self.getCurrentsNetwork(G, voltages, finitegrounds)
+                    
+                    # Append node names and convert to array format
+                    branch_currents_array = self.convert_graph_to_3_col(branch_currents,nodeNames)
+                    node_currents_array = self.append_names_to_node_currents(node_currents, nodeNames)
+                    
+                    if self.options.write_cum_cur_map_only==False:                
+                        fileadd = str(int(focal_nodes[i])) + '_' + str(int(focal_nodes[j]))
+                        CSIO.write_currents(self.options.output_file, branch_currents_array, node_currents_array, fileadd)
+
+                    cum_node_currents = cum_node_currents + node_currents
+                    cum_branch_currents = cum_branch_currents + branch_currents                       
+
+                if (self.options.write_volt_maps == True) and (solver_failed==False):
+                    fileadd = str(int(focal_nodes[i])) + '_' + str(int(focal_nodes[j]))
+                    CSIO.write_voltages(self.options.output_file, voltages, nodeNames, fileadd)
+
+                if solver_failed==True:
+                    solver_failed = False
+                    #solver_failed_somewhere = True                 
+            if (use_resistance_calc_shortcut==True) and (i==anchor_point): #this happens once per component. Anchorpoint is the first i in component
+                shortcut_resistances = self.get_shortcut_resistances(anchor_point,voltmatrix,numpoints,resistances,shortcut_resistances)
              
             G[dst,dst] = G_dst_dst
              
         if self.options.write_cur_maps == True:
-            cumBranchCurrentsArray = self.convert_graph_to_3_col(cumBranchCurrents,nodeNames)
-            cumNodeCurrentsArray =  self.append_names_to_node_currents(cumNodeCurrents, nodeNames)
+            cum_branch_currents_array = self.convert_graph_to_3_col(cum_branch_currents,nodeNames)
+            cum_node_currents_array =  self.append_names_to_node_currents(cum_node_currents, nodeNames)
         else:
-            cumBranchCurrentsArray = -1
-            cumNodeCurrentsArray = -1
+            cum_branch_currents_array = -1
+            cum_node_currents_array = -1
 
-        if useResistanceCalcShortcut==True:
-            resistances = shortcutResistances
+        if use_resistance_calc_shortcut==True:
+            resistances = shortcut_resistances
         for i in range(0,numpoints):
             resistances[i, i] = 0
 
-        outputResistances = self.append_names_to_resistances(focalNodes, resistances)       
-        resistances3columns = self.convertResistances3cols(outputResistances) 
+        output_resistances = self.append_names_to_resistances(focal_nodes, resistances)       
+        resistances3columns = self.convertResistances3cols(output_resistances) 
                
-        return cumBranchCurrentsArray, cumNodeCurrentsArray, resistances3columns, solver_failed  
+        return cum_branch_currents_array, cum_node_currents_array, resistances3columns, solver_failed  
 
 
         
@@ -299,16 +308,16 @@ class circuitscape(CSRaster):
         return outputNodeCurrents        
 
 
-    def getCurrentsNetwork(self,G,voltages,finitegrounds):
+    def getCurrentsNetwork(self, G, voltages, finitegrounds):
         """Returns node and branch currents given voltages in arbitrary graphs."""
         G =  G.tocoo()
         node_currents = self.get_node_currents(voltages, G, finitegrounds)
-        node_currents_col = zeros((node_currents.shape[0],1),dtype = 'float64')
+        node_currents_col = np.zeros((node_currents.shape[0],1), dtype='float64')
         node_currents_col[:,0] = node_currents[:]
-        branch_currents = self.get_branch_currents(G,voltages,True) 
-        branch_currents = absolute(branch_currents) 
+        branch_currents = self.get_branch_currents(G, voltages, True) 
+        branch_currents = np.absolute(branch_currents) 
         G = G.tocsr()
-        return node_currents_col,branch_currents
+        return node_currents_col, branch_currents
     
     
     def getVoltmatrixNetwork(self, i, j, numpoints, voltages, resistances, voltmatrix, focalNodes, nodeNames):                                            
@@ -318,9 +327,9 @@ class circuitscape(CSRaster):
         voltages or currents are mapped.
         
         """  
-        voltvector = zeros((numpoints,1),dtype = 'float64')  
-        for point in range(1,numpoints):
-            node=self.nameToNode(nodeNames,focalNodes[point])
+        voltvector = np.zeros((numpoints, 1), dtype='float64')  
+        for point in range(1, numpoints):
+            node = self.name_to_node(nodeNames, focalNodes[point])
             voltageAtPoint = voltages[node] 
             voltageAtPoint = 1-(voltageAtPoint/resistances[i, j])
             voltvector[point] = voltageAtPoint
@@ -328,10 +337,10 @@ class circuitscape(CSRaster):
         return voltmatrix             
              
              
-    def nameToNode(self, nodeNames, name):
+    def name_to_node(self, node_names, name):
         """Returns node index given node ID."""  
-        nodeNames = nodeNames.tolist()
-        node = nodeNames.index(name)
+        node_names = node_names.tolist()
+        node = node_names.index(name)
         return node
 
 
@@ -395,7 +404,6 @@ class circuitscape(CSRaster):
 
 
     def readFocalNodes(self, filename):
-        #print("readFocalNodes: %s" % (filename,))
         """Loads list of focal nodes for arbitrary graph."""  
         focalNodes = CSIO.load_graph(filename)
         try:    
@@ -424,18 +432,18 @@ class circuitscape(CSRaster):
         return graphNcol
 
 
-    def pruneIncludedPairsNetwork(self,focalNodes):
+    def prune_included_pairs_network(self, focalNodes):
         """Remove excluded points from focal node list when using extra file that lists pairs to include/exclude in network mode."""   
-        includedPairs = (self.state.includedPairs)
+        includedPairs = (self.state.included_pairs)
         includeList = list(includedPairs[0,:])
         point = 0
         _drop_flag = False
         while point < focalNodes.size: #Prune out any points not in includeList
             if focalNodes[point] in includeList: #match
-                point = point+1
+                point += 1
             else:
                 _drop_flag = True   
-                focalNodes=delete(focalNodes,point)
+                focalNodes = delete(focalNodes, point)
          
         includeList = list(focalNodes[:])
         numConnectionRows = includedPairs.shape[0]
@@ -444,11 +452,11 @@ class circuitscape(CSRaster):
             if includedPairs [row,0] in includeList: #match
                 row = row+1
             else:
-                includedPairs = deleterowcol(includedPairs,delrow = row,delcol = row)   
+                includedPairs = deleterowcol(includedPairs, delrow = row, delcol = row)   
                 _drop_flag = True
                 numConnectionRows = numConnectionRows-1
 
-        self.state.includedPairs = includedPairs                     
+        self.state.included_pairs = includedPairs                     
 #         if _drop_flag==True:
 #             print'\nNOTE: Code to exclude pairwise calculations is activated and \nsome entries did not match with focal node file.  \nSome focal nodes may have been dropped.'      
         return focalNodes
