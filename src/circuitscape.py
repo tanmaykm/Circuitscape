@@ -59,6 +59,33 @@ class circuitscape(CSRaster):
 
         (g_graph, node_names) = self.read_graph(self.options.graph_file)
         focalNodes = self.readFocalNodes(self.options.focal_node_file)
+
+# tan: attempt to call raster mode from network mode        
+#         g_map = g_graph.todense()
+#         print g_map
+#         print focalNodes
+#         print node_names
+#         nx,ny = sparse.triu(g_graph).nonzero()
+#         points_rc = []
+#         
+#         pidx = 1
+#         for idx in range(0, len(nx)):
+#             if (nx[idx] in focalNodes) and (ny[idx] in focalNodes):
+#                 points_rc.append([pidx, nx[idx], ny[idx]])
+#                 pidx += 1
+#         points_rc = np.array(points_rc)
+#         print points_rc
+#         self.state.nrows = g_map.shape[0]
+#         self.state.ncols = g_map.shape[1]
+#         self.state.cellsize = 1
+#         self.state.xllcorner = self.state.yllcorner = 1
+#         self.state.g_map = g_map
+#         self.state.poly_map = []
+#         self.state.points_rc = points_rc
+#         resistances, solver_failed = self.pairwise_module(self.state.g_map, self.state.poly_map, self.state.points_rc)
+#         print resistances
+#         print solver_failed
+#         return resistances, solver_failed
         return self.compute_network_pairwise(g_graph, node_names, focalNodes)
     
     def compute_network_pairwise(self, g_graph, node_names, focalNodes):
@@ -83,7 +110,7 @@ class circuitscape(CSRaster):
                 indices = np.where(C == component)
                 nodes_in_component = node_names[indices]                
                 g_graph = deleterowcol(full_graph, delrow = del_indices, delcol = del_indices)
-                
+            
             G = self.laplacian(g_graph)
             del g_graph
 
@@ -168,6 +195,7 @@ class circuitscape(CSRaster):
         full_resistances = full_resistances[ind] 
         CSIO.write_resistances_3columns(self.options.output_file, full_resistances)
         
+        print("full_resistances %s = %s"%(type(full_resistances), str(full_resistances)))
         return full_resistances,solver_failed #Fixme: need to check solver failed.
 
           
@@ -203,7 +231,9 @@ class circuitscape(CSRaster):
             voltmatrix = np.zeros((numpoints, numpoints), dtype='float64')
                  
         dst_point = 0
-        anchor_point = 0            
+        anchor_point = 0
+        
+        print("use_resistance_calc_shortcut=%s, numpoints=%d"%(str(use_resistance_calc_shortcut),numpoints))            
         
         x = 0
         for i in range(0, numpoints):
@@ -229,9 +259,11 @@ class circuitscape(CSRaster):
                 else:
                     y = numpoints*(numpoints-1)/2
                     self.log ('solving focal pair %d of %d'%(x,y), 1)   
-                             
+                #self.log("sdfsdfdsfds***************** %d"%(included_pairs[i+1, j+1],), 1)             
                 if included_pairs[i+1, j+1] != 1:
                     continue
+                self.log("12312312312312*****************", 1)
+                self.log("s", 1)             
                 
                 src = self.name_to_node(nodeNames, focal_nodes[j])
                 try:
@@ -284,6 +316,7 @@ class circuitscape(CSRaster):
         for i in range(0,numpoints):
             resistances[i, i] = 0
 
+        print("resistances %s = %s"%(type(resistances), str(resistances)))
         output_resistances = self.append_names_to_resistances(focal_nodes, resistances)       
         resistances3columns = self.convertResistances3cols(output_resistances) 
                
@@ -402,9 +435,6 @@ class circuitscape(CSRaster):
         try:    
             if filename==self.options.graph_file:#If graph was used as focal node file, then just want first two columns for focal_nodes.
                 focal_nodes = deletecol(focal_nodes, 2)
-                #print("*** graph file and focal node files are same: %s***"%(filename,))
-            #else:
-            #    print("*** graph file and focal node files are different: %s, %s***"%(filename,self.options.graph_file))
             focal_nodes = np.unique(np.asarray(focal_nodes))
         except:
             raise RuntimeError('Error processing focal node file.  Please check file format')

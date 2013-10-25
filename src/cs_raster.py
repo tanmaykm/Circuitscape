@@ -355,19 +355,34 @@ class CSRaster(object):
             if self.options.use_included_pairs == True:
                 points_rc = self.prune_included_pairs(points_rc)
 
-            print("solving file: %s"%(self.options.habitat_file,))
-            xnode_map = self.construct_node_map(g_map, poly_map)
-            xG = self.construct_g_graph(g_map, xnode_map)
-            nzr, nzc = xG.nonzero()
-            nodeNames = numpy.unique(numpy.concatenate((nzr, nzc)))
-            focalNodes = numpy.unique(numpy.asarray(points_rc))
-            print "node_map = %s"%(str(xnode_map,))
-            print "xG = %s" % (str(xG))
-            print "nzr=%s, nzc=%s"%(str(nzr),str(nzc))
-            print "nodeNames=%s"%(str(nodeNames),)
-            print "focalNodes=%s"%(str(focalNodes,))
-            res = self.compute_network_pairwise(xG, nodeNames, focalNodes)
-            print res
+# tan: attempt to call network mode from raster mode
+#             print("solving file: %s"%(self.options.habitat_file,))
+#             xnode_map = self.construct_node_map(g_map, poly_map)
+#             xG = self.construct_g_graph(g_map, xnode_map)
+#             nzr, nzc = xG.nonzero()
+#             nodeNames = numpy.unique(numpy.concatenate((nzr, nzc)))
+#             focalNodes = []
+#             print "points_rc.shape = %s"%(str(points_rc.shape),)
+#             print "nodeNames.shape = %s"%(str(nodeNames.shape),)
+#             for pidx in range(0, points_rc.shape[0]):
+#                 print "pidx=%d"%(pidx,)
+#                 nnx = points_rc[pidx,1]
+#                 print "nnx=%d"%(nnx,)
+#                 nny = points_rc[pidx,2]
+#                 print "nny=%d"%(nny,)
+#                 focalNodes.append(xnode_map[points_rc[pidx,1], points_rc[pidx,2]])
+#             focalNodes = numpy.unique(numpy.asarray(focalNodes))
+#             #focalNodes = numpy.unique(numpy.concatenate((points_rc[:,1], points_rc[:,2])))
+#             print "gmap = %s" % (str(g_map),)
+#             print "poly_map = %s" % (str(poly_map),)
+#             print "points_rc = %s" % (str(points_rc),)
+#             print "node_map = %s" % (str(xnode_map),)
+#             print "xG = %s" % (str(xG),)
+#             print "nzr=%s, nzc=%s" % (str(nzr),str(nzc))
+#             print "nodeNames=%s" % (str(nodeNames),)
+#             print "focalNodes=%s" % (str(focalNodes),)
+#             res = self.compute_network_pairwise(xG, nodeNames, focalNodes)
+#             print res
             
             report_status = True
             try:
@@ -437,14 +452,15 @@ class CSRaster(object):
                     if solver_failed == True:
                         logging.warning('Solver failed for at least one focal node pair.  \nPairs with failed solves will be marked with value of -777 \nin output resistance matrix.\n')
 
-                    resistances[i,j] = pairwise_resistance[0,1]
-                    resistances[j,i] = pairwise_resistance[0,1]
+                    resistances[j,i] = resistances[i,j] = pairwise_resistance[0,1]
 
         for i in range(0,resistances.shape[0]): #Set diagonal to zero
             resistances[i, i] = 0
 
+        print "resistances = %s"%(str(resistances),)
         #Add row and column headers and write resistances to disk
         resistances = self.write_resistances(point_ids, resistances)
+        print "resistances = %s"%(str(resistances),)
 
         if self.options.write_cur_maps == True:
             if solver_failed == False:
@@ -458,6 +474,7 @@ class CSRaster(object):
                     CSIO.write_aaigrid('max_curmap', '', max_current_map, self.options, self.state)
 
         print str((resistances, solver_failed))
+        print type(resistances)
         return resistances,solver_failed
     
     
@@ -486,7 +503,7 @@ class CSRaster(object):
         
         resistances = -1 * numpy.ones((numpoints, numpoints), dtype = 'float64')         #Inf creates trouble in python 2.5 on Windows. Use -1 instead.
         
-        self.log('Graph has %d nodes and %d components'%(node_map.max(), components.max()), 2)
+        self.log('Graph has %d nodes, %d focal nodes and %d components'%(node_map.max(), numpoints, components.max()), 2)
         for comp in range(1, int(components.max()+1)):
             if not self.check_points_in_component(comp, numpoints, components, points_rc, node_map):
                 continue
@@ -495,6 +512,9 @@ class CSRaster(object):
             if comp == int(components.max()):
                 del component_map
 
+            print "*********** in regular code ************"
+            print "G = %s"%(str(G),)
+            print "local node map = %s"%(str(local_node_map),)
             resistances, shortcut_resistances, cum_current_map, max_current_map, solver_failed_somewhere = self.single_ground_all_pair_resistances_for_component(G, included_pairs, points_rc, components, node_map, local_node_map, comp, resistances, shortcut_resistances, cum_current_map, max_current_map, use_resistance_calc_shortcut, report_status)
             
         # Finally, resistance to self is 0.
@@ -507,6 +527,8 @@ class CSRaster(object):
 
 
     def single_ground_all_pair_resistances_for_component(self, G, included_pairs, points_rc, components, node_map, local_node_map, comp, resistances, shortcut_resistances, cum_current_map, max_current_map, use_resistance_calc_shortcut, report_status):
+        print "local node map = "
+        print local_node_map
         numpoints = points_rc.shape[0] 
         last_write_time = time.time()
         x = 0
@@ -528,8 +550,6 @@ class CSRaster(object):
 
             dst = self.grid_to_graph(points_rc[i_idx,1], points_rc[i_idx,2], node_map)
             local_dst = self.grid_to_graph(points_rc[i_idx,1], points_rc[i_idx,2], local_node_map)
-            #if(dst != local_dst):
-            #    print("dst=%d local_dst=%d"%(dst,local_dst))
             
             if (dst >=  0 and components[dst] == comp):
                 dst_point += 1
@@ -561,8 +581,6 @@ class CSRaster(object):
                             self.log('solving focal pair %d of %d'%(x,y), 1)
                     src = self.grid_to_graph(points_rc[j_idx,1], points_rc[j_idx,2], node_map)
                     local_src = self.grid_to_graph (points_rc[j_idx,1], points_rc[j_idx,2], local_node_map)
-                    #if(src != local_src):
-                    #    print("src=%d local_src=%d"%(src,local_src))
                     
                     if (src >=  0 and components[src] == comp):
                         #print ("solving src=%d local_src=%d dst=%d local_dst=%d componets_src=%d components_dst=%d"%(src,local_src,dst,local_dst, components[src], components[dst]))
@@ -573,16 +591,14 @@ class CSRaster(object):
                         except:
                             solver_failed = True
                             solver_failed_somewhere = True
-                            resistances[i_idx, j_idx] = -777
-                            resistances[j_idx, i_idx] = -777
+                            resistances[j_idx, i_idx] = resistances[i_idx, j_idx] = -777
 
                         if solver_failed == False:
                             if self.options.low_memory_mode==True or self.options.point_file_contains_polygons==True:
                                 self.state.amg_hierarchy = None
                                 gc.collect()    
                             
-                            resistances[i_idx, j_idx] = voltages[local_src] - voltages[local_dst]
-                            resistances[j_idx, i_idx] = voltages[local_src] - voltages[local_dst]
+                            resistances[j_idx, i_idx] = resistances[i_idx, j_idx] = voltages[local_src] - voltages[local_dst]
                             # Write maps to files
                             frompoint = str(points_rc[i_idx,0])
                             topoint = str(points_rc[j_idx,0])
@@ -1061,7 +1077,7 @@ class CSRaster(object):
             poly_map_pruned = selector * poly_map
 
         node_map_pruned = self.construct_node_map(g_map_pruned, poly_map_pruned)
-        G_pruned = self.construct_g_graph(g_map_pruned, node_map_pruned) 
+        G_pruned = self.construct_g_graph(g_map_pruned, node_map_pruned)
         G = self.laplacian(G_pruned) 
         
         return (G, node_map_pruned)
